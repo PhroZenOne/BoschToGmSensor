@@ -5,22 +5,24 @@
 #define standardVoltage 5
 #define minRelayPosition 3
 #define maxRelayPosition 12
+#define builtInResistance 35.5d
 
 //from https://rusefi.com/Steinhart-Hart.html
-#define gmA 0.002210276888384481d
-#define gmB 0.00008159559425004526d
-#define gmC 0.0000009505063945735256d
+// 100F -> 1400
+// 190F -> 85
+// 280F -> 35
+#define gmA 0.0005863816167495897d
+#define gmB 0.0005691994843139358d
+#define gmC -0.000003928812678091945d
+
 
 #define boschA 0.001290549974604263d
 #define boschB 0.00026131506246163474d
-#define boschC 0.00000016232144788010084
+#define boschC 0.00000016232144788010084d
 
-#define kelvinOffset 273.15
+#define kelvinOffset 273.15d
 
-typedef struct tmpToRes_t {
-  int temp;
-  int resistance;
-} tmpToRes_t;
+#define maxResistanceValue 2047
 
 unsigned int currentSimulatedResistance = 0;
 
@@ -38,18 +40,25 @@ void setup() {
     digitalWrite(i, LOW);
   }
 
-  int maxResistanceValue = 2047;
+  delay(100);
 
-  // then sweep to highest resistance (needle sweep)
-  for (int i = 0; i < maxResistanceValue; i++){
-    configureRelays(i);
-    delay(2);
-  }
+  int resistance = temperatureToResistance(88.0d, gmA, gmB, gmC);
+  configureRelays(resistance);
 
-  for (int i = maxResistanceValue; i >= 0; i--){
-    configureRelays(i);
-    delay(2);
+  delay(2000);
+
+  // needle sweep
+  for (int i = 37; i <= 138; i++){
+    double resistance = temperatureToResistance(i, gmA, gmB, gmC);
+    configureRelays(resistance);
+    delay(5);
   }
+  for (int i = 138; i >= 37; i--){
+    double resistance = temperatureToResistance(i, gmA, gmB, gmC);
+    configureRelays(resistance);
+    delay(5);
+  }
+  configureRelays(maxResistanceValue);
 }
 
 void loop() {
@@ -59,27 +68,45 @@ void loop() {
 
   double newResistance = temperatureToResistance(boschTemperature, gmA, gmB, gmC);
   if (newResistance == currentSimulatedResistance) {
-    delay(1500);
+    delay(2000);
     return;
   }
   currentSimulatedResistance = newResistance;
   configureRelays(currentSimulatedResistance);
-  delay(1500);
+  delay(2000);
 }
 
 double resistanceToTemperature(int resistance, double a, double b, double c){
   double logR = log(resistance);
-  return 1 / (a + (b * logR) + (c * pow(logR, 3))) - kelvinOffset;
+  return 1.0d / (a + (b * logR) + (c * pow(logR, 3.0d))) - kelvinOffset;
 }
 
-double temperatureToResistance(double temperature, double a, double b, double c){
-  double x = (1/c)*(a-(1/temperature));
-  double y = sqrt(pow(b/(3*c), 3)+(pow(x, 2)/4));
-  return exp(pow(y-(x/2), 1/3) - pow(y+(x/2), 1/3));
+// Binary search to find a close inverse,
+// as the inverse algos breaks down
+// to imaginary numbers
+// when trying the ABC constants I got
+// and my math skills are not good enough to 
+// figure out how to handle it.  
+int temperatureToResistance(double temperatureInC, double a, double b, double c){
+  int rMax = 2024;
+  int rMin = 1;
+  int r = 700;
+  while(r < rMax && r > rMin){
+      double t = resistanceToTemperature(r, a, b, c);
+      if(t < temperatureInC){
+          rMax = r;
+          r = rMin + ((r - rMin)/2);
+      } else {
+          rMin = r;
+          r = r + ((rMax - r)/2);
+      }
+  }
+  return r;
 }
 
 void configureRelays(int resistance) {
-  unsigned int resistanceActiveFlags = translatePattern(currentSimulatedResistance);
+  resistance = max(min(resistance-builtInResistance, maxResistanceValue), 0);
+  unsigned int resistanceActiveFlags = translatePattern(resistance);
   for (int relay = minRelayPosition; relay <= maxRelayPosition; relay++) {
     bool disableRelay = resistanceActiveFlags & (1 << relay);
     if (disableRelay) {
